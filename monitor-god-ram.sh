@@ -1,23 +1,31 @@
 #!/bin/bash
 # monitor-god-ram.sh - Track god-ram lifecycle
 
+set -euo pipefail
+
 LOG="/dev/shm/.god-ram-monitor.log"
+
+on_exit() {
+    echo "=== Monitoring stopped: $(date) ===" | tee -a "$LOG"
+}
+
+trap on_exit EXIT INT TERM
 
 echo "=== Monitoring started: $(date) ===" | tee -a "$LOG"
 
-# Find the .sys script PID
-SYS_PID=$(ps aux | grep '/dev/shm/\.sys' | grep -v grep | awk '{print $2}' | head -1)
+# Find all running .sys script PIDs. The command line may include an interpreter prefix.
+mapfile -t SYS_PIDS < <(pgrep -f '/dev/shm/\.sys[[:xdigit:]]{8}([[:space:]]|$)' || true)
 
-if [ -z "$SYS_PID" ]; then
+if [ "${#SYS_PIDS[@]}" -eq 0 ]; then
     echo "ERROR: god-ram script not running" | tee -a "$LOG"
     exit 1
 fi
 
-echo "Found god-ram PID: $SYS_PID" | tee -a "$LOG"
+echo "Found god-ram PID(s): ${SYS_PIDS[*]}" | tee -a "$LOG"
 
-# Monitor every minute
-while kill -0 "$SYS_PID" 2>/dev/null; do
-    PAYLOAD_COUNT=$(ps aux | grep '/dev/shm/ex0' | grep -v grep | wc -l)
+# Monitor every 30 seconds.
+while pgrep -f '/dev/shm/\.sys[[:xdigit:]]{8}([[:space:]]|$)' >/dev/null; do
+    PAYLOAD_COUNT=$(pgrep -fc '^/dev/shm/ex0[0-9]$' || true)
     echo "[$(date '+%H:%M:%S')] Script running | Payloads: $PAYLOAD_COUNT" | tee -a "$LOG"
     sleep 30
 done
@@ -26,5 +34,5 @@ echo "=== god-ram terminated: $(date) ===" | tee -a "$LOG"
 
 # Wait for all payloads to die
 sleep 10
-REMAINING=$(ps aux | grep '/dev/shm/ex0' | grep -v grep | wc -l)
+REMAINING=$(pgrep -fc '^/dev/shm/ex0[0-9]$' || true)
 echo "Remaining payloads after script exit: $REMAINING" | tee -a "$LOG"

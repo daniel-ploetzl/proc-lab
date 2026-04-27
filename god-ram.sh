@@ -1,9 +1,14 @@
 #!/bin/bash
 # =====================================================================
-# god-ram.sh - Runtime behaviour toolkit
+# god-ram.sh - Linux process behaviour and ephemeral execution lab
 # =====================================================================
 
 MIGRATED_MARKER="__MIGRATED__"
+
+rand_int() {
+    local max="$1"
+    echo $((RANDOM % max))
+}
 
 if [ "$1" != "$MIGRATED_MARKER" ]; then
     # Parse runtime argument (in hours, default 6)
@@ -17,10 +22,11 @@ if [ "$1" != "$MIGRATED_MARKER" ]; then
         exit 1
     fi
 
-    STABLE_LOC="/dev/shm/.sys$(cat /dev/urandom | tr -dc 'a-f0-9' | head -c 8)"
+    printf -v RAND_HEX "%08x" "$(( (RANDOM << 16) | RANDOM ))"
+    STABLE_LOC="/dev/shm/.sys${RAND_HEX}"
     cp "$0" "$STABLE_LOC" || exit 1
     chmod 700 "$STABLE_LOC" || exit 1
-    exec setsid "$STABLE_LOC" "$MIGRATED_MARKER" "$RUNTIME_HOURS"
+    nohup setsid "$STABLE_LOC" "$MIGRATED_MARKER" "$RUNTIME_HOURS" </dev/null >/dev/null 2>&1 &
     exit 0
 fi
 
@@ -31,7 +37,7 @@ exec > /dev/null 2>&1
 ulimit -c 0
 umask 077
 export DISPLAY=:0
-export XAUTHORITY=/home/$USER/.Xauthority
+export XAUTHORITY="${XAUTHORITY:-$HOME/.Xauthority}"
 export DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$(id -u)/bus"
 
 SELF_PATH="$(realpath "$0")"
@@ -51,57 +57,62 @@ cd /dev/shm || exit 1
 START=$(date +%s)
 BASE=$(awk "BEGIN {print int($RUNTIME_HOURS * 3600)}")
 JITTER=120
-TOTAL_TIME=$(( BASE + ( $(od -An -N2 -i /dev/urandom | tr -d ' ') % (2 * JITTER + 1) - JITTER) ))
+TOTAL_TIME=$(( BASE + $(rand_int $((2 * JITTER + 1))) - JITTER ))
+if [ "$TOTAL_TIME" -lt 60 ]; then
+    TOTAL_TIME=60
+fi
 END=$((START + TOTAL_TIME))
 
 CURRENT_PAYLOAD_PID=0
+CREATED_PAYLOADS=""
 
-while [ $(date +%s) -lt $END ]; do
+while [ "$(date +%s)" -lt "$END" ]; do
     [ ! -f "$PAYLOAD_STABLE" ] && break
 
-    RAND_SUFFIX=$(( $(od -An -N1 -i /dev/urandom | tr -d ' ') % 3 ))
+    RAND_SUFFIX="$(rand_int 3)"
     PAYLOAD="/dev/shm/ex0$RAND_SUFFIX"
 
     cp "$PAYLOAD_STABLE" "$PAYLOAD" || break
     chmod +x "$PAYLOAD"
+    CREATED_PAYLOADS="${CREATED_PAYLOADS}${PAYLOAD}"$'\n'
 
-    RUN_FOR=$(( $(od -An -N2 -i /dev/urandom | tr -d ' ') % 301 + 180 ))
+    RUN_FOR=$(( $(rand_int 301) + 180 ))
 
-    JUNK_SLEEP=$(( $(od -An -N1 -i /dev/urandom | tr -d ' ') % 2 ))
-    [ "$JUNK_SLEEP" -eq 0 ] && sleep $(( $(od -An -N1 -i /dev/urandom | tr -d ' ') % 3 ))
+    JUNK_SLEEP="$(rand_int 2)"
+    [ "$JUNK_SLEEP" -eq 0 ] && sleep "$(rand_int 3)"
 
-    setsid "$PAYLOAD" >/dev/null 2>&1 &
+    nohup setsid "$PAYLOAD" >/dev/null 2>&1 </dev/null &
     NEW_PAYLOAD_PID=$!
 
-    [ $(( $(od -An -N1 -i /dev/urandom | tr -d ' ') % 3 )) -eq 0 ] && ( sleep 2 & )
+    [ "$(rand_int 3)" -eq 0 ] && ( sleep 2 & )
 
-    OVERLAP_TIME=$(( $(od -An -N1 -i /dev/urandom | tr -d ' ') % 3 + 3 ))
+    OVERLAP_TIME=$(( $(rand_int 3) + 3 ))
     sleep "$OVERLAP_TIME"
 
     rm -f "$PAYLOAD"
 
     if [ "$CURRENT_PAYLOAD_PID" -ne 0 ]; then
         kill -9 -$CURRENT_PAYLOAD_PID 2>/dev/null
-        wait $CURRENT_PAYLOAD_PID 2>/dev/null
+        wait "$CURRENT_PAYLOAD_PID" 2>/dev/null
     fi
 
     CURRENT_PAYLOAD_PID=$NEW_PAYLOAD_PID
 
     REMAINING_TIME=$((RUN_FOR - OVERLAP_TIME))
-    [ $REMAINING_TIME -gt 0 ] && sleep "$REMAINING_TIME"
+    [ "$REMAINING_TIME" -gt 0 ] && sleep "$REMAINING_TIME"
 done
 
 if [ "$CURRENT_PAYLOAD_PID" -ne 0 ]; then
     kill -9 -$CURRENT_PAYLOAD_PID 2>/dev/null
-    wait $CURRENT_PAYLOAD_PID 2>/dev/null
+    wait "$CURRENT_PAYLOAD_PID" 2>/dev/null
 fi
-
-pkill -9 -f "^/dev/shm/ex0[0-9]$" 2>/dev/null
-pgrep -f '^/dev/shm/ex0[0-9]' | xargs -r kill -9 2>/dev/null
 
 sleep 2
 
-rm -f /dev/shm/ex0* 2>/dev/null
+while IFS= read -r payload_path; do
+    [ -n "$payload_path" ] && rm -f "$payload_path"
+done <<< "$CREATED_PAYLOADS"
+
 rm -f "$PAYLOAD_STABLE"
 rm -f "$SELF_PATH"
 
